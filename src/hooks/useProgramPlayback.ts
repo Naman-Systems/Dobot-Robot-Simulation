@@ -23,6 +23,7 @@ interface PlaybackProps {
   setStatusDetail: (msg: string) => void;
 }
 
+// Manages teaching points, program files, and playback of recorded robot motions.
 export function useProgramPlayback({
   currentCoords,
   currentJoints,
@@ -39,7 +40,7 @@ export function useProgramPlayback({
   const [currentLoop, setCurrentLoop] = useState<number>(1);
   const [selectedPointId, setSelectedPointId] = useState<string | null>(null);
 
-  // References for continuous loop control
+  // Refs preserve playback controls and the latest program across async waits.
   const stopRequestedRef = useRef<boolean>(false);
   const pauseRequestedRef = useRef<boolean>(false);
   const resumeResolverRef = useRef<(() => void) | null>(null);
@@ -47,16 +48,17 @@ export function useProgramPlayback({
   const loopRef = useRef<number>(1);
   const progRef = useRef<ProgramData>(program);
 
+  // Keep the ref current so playback and export always read the latest program.
   progRef.current = program;
 
-  // Sync selected point on load
+  // Select the first point when a non-empty program has no current selection.
   useEffect(() => {
     if (program.points.length > 0 && !selectedPointId) {
       setSelectedPointId(program.points[0].id);
     }
   }, [program.points, selectedPointId]);
 
-  // If emergency stop fires, stop playback immediately
+  // Abort active playback as soon as the emergency stop becomes active.
   useEffect(() => {
     if (emergencyStop && playbackState === 'running') {
       stopRequestedRef.current = true;
@@ -66,7 +68,7 @@ export function useProgramPlayback({
     }
   }, [emergencyStop, playbackState, setStatus, setStatusDetail]);
 
-  // Autosave to localStorage on program modification
+  // Apply a program update and persist the resulting version to local storage.
   const updateProgram = useCallback((updater: (prev: ProgramData) => ProgramData) => {
     setProgram((prev) => {
       const next = updater(prev);
@@ -75,8 +77,7 @@ export function useProgramPlayback({
     });
   }, []);
 
-  // Point Operations:
-  // Add current live position as a new point
+  // Add the current robot coordinates and joints to the teaching table.
   const addCurrentPositionAsPoint = useCallback(
     (name?: string, motionType: MotionType = 'MOVJ') => {
       updateProgram((prev) => {
@@ -100,7 +101,7 @@ export function useProgramPlayback({
     [currentCoords, currentJoints, updateProgram, setStatusDetail]
   );
 
-  // Delete point by ID
+  // Remove a point, reindex the remaining points, and repair the selection.
   const deletePoint = useCallback(
     (id: string) => {
       updateProgram((prev) => {
@@ -116,7 +117,7 @@ export function useProgramPlayback({
     [selectedPointId, updateProgram, setStatusDetail]
   );
 
-  // Move point Up
+  // Swap a point with its previous neighbor and refresh display indices.
   const movePointUp = useCallback(
     (index: number) => {
       if (index <= 0) return;
@@ -132,7 +133,7 @@ export function useProgramPlayback({
     [updateProgram]
   );
 
-  // Move point Down
+  // Swap a point with its next neighbor and refresh display indices.
   const movePointDown = useCallback(
     (index: number) => {
       updateProgram((prev) => {
@@ -148,7 +149,7 @@ export function useProgramPlayback({
     [updateProgram]
   );
 
-  // Update specific point fields
+  // Merge edited fields into the matching teaching point.
   const updatePoint = useCallback(
     (id: string, updates: Partial<TeachingPoint>) => {
       updateProgram((prev) => {
@@ -161,7 +162,7 @@ export function useProgramPlayback({
     [updateProgram]
   );
 
-  // New Program
+  // Replace the current program with a blank program and save it.
   const newProgram = useCallback(() => {
     const blank: ProgramData = {
       id: `prog-${Date.now()}`,
@@ -185,7 +186,7 @@ export function useProgramPlayback({
     setStatusDetail('Created new empty program.');
   }, [setStatusDetail]);
 
-  // Export / Save As
+  // Download the latest program as a JSON file.
   const exportProgram = useCallback(
     (customName?: string) => {
       exportProgramFile(progRef.current, customName);
@@ -194,7 +195,7 @@ export function useProgramPlayback({
     [setStatusDetail]
   );
 
-  // Import / Open Program
+  // Read a program file, store it locally, and report success or failure.
   const loadProgramFile = useCallback(
     async (file: File) => {
       try {
@@ -212,7 +213,7 @@ export function useProgramPlayback({
     [setStatus, setStatusDetail]
   );
 
-  // Move directly to selected point pose
+  // Move the robot to one point without starting the full playback sequence.
   const jumpToPoint = useCallback(
     async (point: TeachingPoint) => {
       if (playbackState === 'running') return;
@@ -229,8 +230,9 @@ export function useProgramPlayback({
     [playbackState, moveToTarget, setEndEffectorAction, setStatus, setStatusDetail]
   );
 
-  // Playback Execution Loop
+  // Run each point in order for the configured number of loops.
   const startPlayback = useCallback(async () => {
+    // Validate connection, safety state, and program contents before starting.
     if (!virtualConnected) {
       setStatus('Virtual robot disconnected');
       setStatusDetail('Cannot start playback: Virtual robot is disconnected.');
@@ -254,19 +256,22 @@ export function useProgramPlayback({
 
     const totalLoops = progRef.current.settings.loopCount || 1;
 
+    // Iterate through each configured program repetition.
     for (let loop = 1; loop <= totalLoops; loop++) {
       if (stopRequestedRef.current) break;
       loopRef.current = loop;
       setCurrentLoop(loop);
 
+      // Execute every teaching point in order during this repetition.
       for (let i = 0; i < currentPoints.length; i++) {
         if (stopRequestedRef.current) break;
 
-        // Check for pause
+        // Pause at the current point until resumePlayback releases the wait.
         if (pauseRequestedRef.current) {
           setPlaybackState('paused');
           setStatus('Playback paused');
           setStatusDetail(`Playback paused at point ${i + 1}/${currentPoints.length} (Loop ${loop}/${totalLoops}).`);
+          // Hold this loop here until resumePlayback resolves the pending promise.
           await new Promise<void>((resolve) => {
             resumeResolverRef.current = resolve;
           });
@@ -284,7 +289,7 @@ export function useProgramPlayback({
           `Executing Loop ${loop}/${totalLoops} · Point ${i + 1}/${currentPoints.length}: "${pt.name}" [${pt.motionType}]`
         );
 
-        // Execute motion based on motionType
+        // Calculate a waypoint path for JUMP; execute other motion types directly.
         let success = false;
         if (pt.motionType === 'JUMP') {
           // JUMP motion: Vertical lift -> Horizontal traverse -> Lower to target
@@ -311,6 +316,7 @@ export function useProgramPlayback({
           });
         }
 
+        // Stop safely if the robot could not reach this point.
         if (!success && !stopRequestedRef.current) {
           setStatus('Position unreachable');
           setStatusDetail(`Point "${pt.name}" is unreachable! Halting playback safely.`);
@@ -318,12 +324,12 @@ export function useProgramPlayback({
           return;
         }
 
-        // Apply gripper / suction action if specified
+        // Apply the point's end-effector action after reaching its target.
         if (pt.gripperAction && pt.gripperAction !== 'none') {
           setEndEffectorAction(pt.gripperAction);
         }
 
-        // Dwell / pause time at point
+        // Wait at the point for its configured dwell time before continuing.
         if (pt.pauseMs > 0 && !stopRequestedRef.current) {
           await new Promise((r) => setTimeout(r, pt.pauseMs));
         }
@@ -350,14 +356,14 @@ export function useProgramPlayback({
     setStatusDetail,
   ]);
 
-  // Pause Playback
+  // Request a pause; the playback loop enters the paused state at its next check.
   const pausePlayback = useCallback(() => {
     if (playbackState === 'running') {
       pauseRequestedRef.current = true;
     }
   }, [playbackState]);
 
-  // Resume Playback
+  // Clear the pause request and release the playback loop's pending wait.
   const resumePlayback = useCallback(() => {
     if (playbackState === 'paused' && resumeResolverRef.current) {
       pauseRequestedRef.current = false;
@@ -367,7 +373,7 @@ export function useProgramPlayback({
     }
   }, [playbackState]);
 
-  // Stop Playback
+  // Request termination and release playback if it is waiting while paused.
   const stopPlayback = useCallback(() => {
     stopRequestedRef.current = true;
     pauseRequestedRef.current = false;
